@@ -7,7 +7,7 @@ ENV CGO_ENABLED=0
 ENV GOOS=linux
 RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
 
-FROM tailscale/tailscale
+FROM ghcr.io/aothen/tailscale:latest
 
 RUN apk update \
     && apk add --no-cache ca-certificates curl nftables python3 bash tzdata py3-netifaces py3-yaml py3-schedule
