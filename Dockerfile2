@@ -1,0 +1,22 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+
+ARG DERP_VERSION=latest
+# 设置环境变量进行静态编译
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
+
+FROM tailscale/tailscale
+
+RUN apk update \
+    && apk add --no-cache ca-certificates curl nftables python3 bash tzdata py3-netifaces py3-yaml py3-schedule
+RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && rm -rf /var/cache/apk/*
+
+ENV HOME        /opt
+ENV PATH        /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV LANG        C.UTF-8
+ENV LANGUAGE    C.UTF-8
+ENV LC_ALL      C.UTF-8
+
+COPY --from=builder /go/bin/derper /opt/
