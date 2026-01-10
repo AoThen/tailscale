@@ -63,18 +63,11 @@ jobs:
           tags: |
             ghcr.io/${{ env.LOWER_NAME }}:beta
 
-        # ghcr.io/${{ env.LOWER_NAME }}:${{ env.VERSION }}
-        # ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-        # ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-
-      - name: docker大小
-        run: |
-            docker image ls
 
 
       - uses: actions/delete-package-versions@v5
         with: 
-          package-name: ${{ env.IMAGE_NAME }}
+          package-name: 'tailscale'
           package-type: 'container'
           min-versions-to-keep: 3
           delete-only-untagged-versions: 'true'

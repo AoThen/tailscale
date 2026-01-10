@@ -7,7 +7,7 @@ ENV CGO_ENABLED=0
 ENV GOOS=linux
 RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
 
-COPY --from=builder /go/bin/derper /opt/
+
 
 
 # FROM ghcr.io/aothen/tailscale:latest
@@ -53,7 +53,9 @@ RUN apk add --no-cache ca-certificates iptables iproute2 ip6tables
 RUN rm /usr/sbin/iptables && ln -s /usr/sbin/iptables-legacy /usr/sbin/iptables
 RUN rm /usr/sbin/ip6tables && ln -s /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables
 
+COPY --from=builder /go/bin/derper /opt/
 COPY --from=build-env /go/bin/* /usr/local/bin/
+
 
 RUN mkdir /tailscale && ln -s /usr/local/bin/containerboot /tailscale/run.sh
 
