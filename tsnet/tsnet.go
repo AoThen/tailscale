@@ -160,25 +160,26 @@ type Server struct {
 
 	getCertForTesting func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
-	initOnce         sync.Once
-	initErr          error
-	lb               *ipnlocal.LocalBackend
-	sys              *tsd.System
-	netstack         *netstack.Impl
-	netMon           *netmon.Monitor
-	rootPath         string // the state directory
-	hostname         string
-	shutdownCtx      context.Context
-	shutdownCancel   context.CancelFunc
-	proxyCred        string        // SOCKS5 proxy auth for loopbackListener
-	localAPICred     string        // basic auth password for loopbackListener
-	loopbackListener net.Listener  // optional loopback for localapi and proxies
-	localAPIListener net.Listener  // in-memory, used by localClient
-	localClient      *local.Client // in-memory
-	localAPIServer   *http.Server
-	logbuffer        *filch.Filch
-	logtail          *logtail.Logger
-	logid            logid.PublicID
+	initOnce             sync.Once
+	initErr              error
+	lb                   *ipnlocal.LocalBackend
+	sys                  *tsd.System
+	netstack             *netstack.Impl
+	netMon               *netmon.Monitor
+	rootPath             string // the state directory
+	hostname             string
+	shutdownCtx          context.Context
+	shutdownCancel       context.CancelFunc
+	proxyCred            string        // SOCKS5 proxy auth for loopbackListener
+	localAPICred         string        // basic auth password for loopbackListener
+	loopbackListener     net.Listener  // optional loopback for localapi and proxies
+	localAPIListener     net.Listener  // in-memory, used by localClient
+	localClient          *local.Client // in-memory
+	localAPIServer       *http.Server
+	resetServeConfigOnce sync.Once
+	logbuffer            *filch.Filch
+	logtail              *logtail.Logger
+	logid                logid.PublicID
 
 	mu                  sync.Mutex
 	listeners           map[listenKey]*listener
@@ -388,8 +389,8 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 		if n.ErrMessage != nil {
 			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
 		}
-		if s := n.State; s != nil {
-			if *s == ipn.Running {
+		if st := n.State; st != nil {
+			if *st == ipn.Running {
 				status, err := lc.Status(ctx)
 				if err != nil {
 					return nil, fmt.Errorf("tsnet.Up: %w", err)
@@ -398,11 +399,15 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 					return nil, errors.New("tsnet.Up: running, but no ip")
 				}
 
-				// Clear the persisted serve config state to prevent stale configuration
-				// from code changes. This is a temporary workaround until we have a better
-				// way to handle this. (2023-03-11)
-				if err := lc.SetServeConfig(ctx, new(ipn.ServeConfig)); err != nil {
-					return nil, fmt.Errorf("tsnet.Up: %w", err)
+				// The first time Up is run, clear the persisted serve config.
+				// We do this to prevent messy interactions with stale config in
+				// the face of code changes.
+				var srvResetErr error
+				s.resetServeConfigOnce.Do(func() {
+					srvResetErr = lc.SetServeConfig(ctx, new(ipn.ServeConfig))
+				})
+				if srvResetErr != nil {
+					return nil, fmt.Errorf("tsnet.Up: clearing serve config: %w", err)
 				}
 
 				return status, nil
@@ -1223,11 +1228,25 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 	}
 	domain := st.CertDomains[0]
 	hp := ipn.HostPort(domain + ":" + portStr)
+	var cleanupOnClose func() error
 	if !srvConfig.AllowFunnel[hp] {
 		mak.Set(&srvConfig.AllowFunnel, hp, true)
 		srvConfig.AllowFunnel[hp] = true
 		if err := lc.SetServeConfig(ctx, srvConfig); err != nil {
 			return nil, err
+		}
+		cleanupOnClose = func() error {
+			sc, err := lc.GetServeConfig(ctx)
+			if err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			if sc.AllowFunnel != nil {
+				delete(sc.AllowFunnel, hp)
+			}
+			if err := lc.SetServeConfig(ctx, sc); err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			return nil
 		}
 	}
 
@@ -1236,6 +1255,7 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 	if err != nil {
 		return nil, err
 	}
+	ln = &cleanupListener{Listener: ln, cleanup: cleanupOnClose}
 	return tls.NewListener(ln, tlsConfig), nil
 }
 
@@ -1444,3 +1464,30 @@ type addr struct{ ln *listener }
 
 func (a addr) Network() string { return a.ln.keys[0].network }
 func (a addr) String() string  { return a.ln.addr }
+
+// cleanupListener wraps a net.Listener with a function to be run on Close.
+type cleanupListener struct {
+	net.Listener
+	cleanup     func() error
+	cleanupOnce sync.Once
+}
+
+func (cl *cleanupListener) Close() error {
+	var cleanupErr error
+	cl.cleanupOnce.Do(func() {
+		if cl.cleanup != nil {
+			cleanupErr = cl.cleanup()
+		}
+	})
+	closeErr := cl.Listener.Close()
+	switch {
+	case closeErr != nil && cleanupErr != nil:
+		return fmt.Errorf("%w; also: %w", closeErr, cleanupErr)
+	case closeErr != nil:
+		return closeErr
+	case cleanupErr != nil:
+		return cleanupErr
+	default:
+		return nil
+	}
+}
