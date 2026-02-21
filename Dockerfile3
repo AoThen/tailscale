@@ -5,7 +5,16 @@ ARG DERP_VERSION=latest
 # 设置环境变量进行静态编译
 ENV CGO_ENABLED=0
 ENV GOOS=linux
-RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
+# RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
+RUN git clone --depth 1 https://github.com/tailscale/tailscale.git .
+# --- 核心修改：注释掉 cert.go 中的主机名校验 ---
+# 定位到 manualCertManager.getCertificate 方法，注释掉 if 块
+RUN sed -i \
+    '/if hi.ServerName != m.hostname && !m.noHostname {/,/}/ s/^/\/\//' \
+    cmd/derper/cert.go
+# 编译 derper（静态链接，适用于 alpine 镜像）
+WORKDIR /app/cmd/derper
+RUN go build -ldflags="-s -w" -o /app/derper .
 
 
 FROM golang:1.25-alpine AS build-env
@@ -63,7 +72,9 @@ RUN apk update \
     && apk add --no-cache ca-certificates curl nftables python3 bash tzdata py3-netifaces py3-yaml py3-schedule
 RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && rm -rf /var/cache/apk/*
 
-COPY --from=builder /go/bin/derper /opt/
+# COPY --from=builder /go/bin/derper /opt/
+COPY --from=builder /app/derper /opt/
+
 
 
 
