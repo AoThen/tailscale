@@ -6,7 +6,7 @@ ARG DERP_VERSION=latest
 ENV CGO_ENABLED=0
 ENV GOOS=linux
 # RUN go install -ldflags="-s -w" tailscale.com/cmd/derper@${DERP_VERSION}
-RUN git clone https://github.com/tailscale/tailscale.git .
+RUN apk update && apk add --no-cache git && git clone --depth 1  https://github.com/tailscale/tailscale.git .
 # --- 核心修改：注释掉 cert.go 中的主机名校验 ---
 # 定位到 manualCertManager.getCertificate 方法，注释掉 if 块
 RUN sed -i \
@@ -74,6 +74,7 @@ RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && rm -rf /var/cache/apk
 
 # COPY --from=builder /go/bin/derper /opt/
 COPY --from=builder /app/derper /opt/
+
 
 
 
