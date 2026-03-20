@@ -1005,7 +1005,12 @@ func (c *sclient) run(ctx context.Context) error {
 		}
 	}()
 
-	c.startStatsLoop(sendCtx)
+	// Allow disabling RTT stats collection to reduce
+	// CPU and syscalls on servers with high connection
+	// counts
+	if !envknob.Bool("TS_DERP_DISABLE_RTT_STATS") {
+		c.startStatsLoop(sendCtx)
+	}
 
 	for {
 		ft, fl, err := derp.ReadFrameHeader(c.br)
@@ -2208,9 +2213,9 @@ func (s *Server) ExpVar() expvar.Var {
 	m.Set("gauge_current_connections", &s.curClients)
 	m.Set("gauge_current_home_connections", &s.curHomeClients)
 	m.Set("gauge_current_notideal_connections", &s.curClientsNotIdeal)
-	m.Set("gauge_clients_total", expvar.Func(func() any { return len(s.clientsMesh) }))
-	m.Set("gauge_clients_local", expvar.Func(func() any { return len(s.clients) }))
-	m.Set("gauge_clients_remote", expvar.Func(func() any { return len(s.clientsMesh) - len(s.clients) }))
+	m.Set("gauge_clients_total", s.expVarFunc(func() any { return len(s.clientsMesh) }))
+	m.Set("gauge_clients_local", s.expVarFunc(func() any { return len(s.clients) }))
+	m.Set("gauge_clients_remote", s.expVarFunc(func() any { return len(s.clientsMesh) - len(s.clients) }))
 	m.Set("gauge_current_dup_client_keys", &s.dupClientKeys)
 	m.Set("gauge_current_dup_client_conns", &s.dupClientConns)
 	m.Set("counter_total_dup_client_conns", &s.dupClientConnTotal)
