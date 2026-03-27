@@ -34,6 +34,165 @@ type (
 	Client     = derp.Client
 )
 
+func TestReadFrameHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    [5]byte
+		wantType derp.FrameType
+		wantLen  uint32
+	}{
+		{
+			name:     "SendPacket",
+			input:    [5]byte{byte(derp.FrameSendPacket), 0x00, 0x00, 0x04, 0x00},
+			wantType: derp.FrameSendPacket,
+			wantLen:  1024,
+		},
+		{
+			name:     "KeepAlive",
+			input:    [5]byte{byte(derp.FrameKeepAlive), 0x00, 0x00, 0x00, 0x00},
+			wantType: derp.FrameKeepAlive,
+			wantLen:  0,
+		},
+		{
+			name:     "MaxLen",
+			input:    [5]byte{byte(derp.FrameRecvPacket), 0xff, 0xff, 0xff, 0xff},
+			wantType: derp.FrameRecvPacket,
+			wantLen:  0xffffffff,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			br := bufio.NewReader(bytes.NewReader(tt.input[:]))
+			gotType, gotLen, err := derp.ReadFrameHeader(br)
+			if err != nil {
+				t.Fatalf("ReadFrameHeader: %v", err)
+			}
+			if gotType != tt.wantType {
+				t.Errorf("type = %v, want %v", gotType, tt.wantType)
+			}
+			if gotLen != tt.wantLen {
+				t.Errorf("len = %v, want %v", gotLen, tt.wantLen)
+			}
+		})
+	}
+
+	// Verify zero allocations.
+	buf := make([]byte, 4096)
+	rd := bytes.NewReader(buf)
+	br := bufio.NewReader(rd)
+	got := testing.AllocsPerRun(1000, func() {
+		rd.Reset(buf)
+		br.Reset(rd)
+		_, _, err := derp.ReadFrameHeader(br)
+		if err != nil {
+			t.Fatalf("ReadFrameHeader: %v", err)
+		}
+	})
+	if got != 0 {
+		t.Fatalf("ReadFrameHeader allocs = %f, want 0", got)
+	}
+}
+
+func TestWriteFrameHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		typ      derp.FrameType
+		frameLen uint32
+		want     [derp.FrameHeaderLen]byte
+	}{
+		{
+			name:     "SendPacket",
+			typ:      derp.FrameSendPacket,
+			frameLen: 1024,
+			want:     [derp.FrameHeaderLen]byte{byte(derp.FrameSendPacket), 0x00, 0x00, 0x04, 0x00},
+		},
+		{
+			name:     "KeepAlive",
+			typ:      derp.FrameKeepAlive,
+			frameLen: 0,
+			want:     [derp.FrameHeaderLen]byte{byte(derp.FrameKeepAlive), 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:     "MaxLen",
+			typ:      derp.FrameRecvPacket,
+			frameLen: 0xffffffff,
+			want:     [derp.FrameHeaderLen]byte{byte(derp.FrameRecvPacket), 0xff, 0xff, 0xff, 0xff},
+		},
+	}
+	for _, tt := range tests {
+		// Test fast path (empty buffer, plenty of space).
+		t.Run(tt.name+"/fast", func(t *testing.T) {
+			var buf bytes.Buffer
+			bw := bufio.NewWriter(&buf)
+			if err := derp.WriteFrameHeader(bw, tt.typ, tt.frameLen); err != nil {
+				t.Fatalf("WriteFrameHeader: %v", err)
+			}
+			bw.Flush()
+			if got := buf.Bytes(); !bytes.Equal(got, tt.want[:]) {
+				t.Errorf("wrote % 02x, want % 02x", got, tt.want)
+			}
+		})
+
+		// Test slow path (buffer nearly full, less than FrameHeaderLen available).
+		t.Run(tt.name+"/slow", func(t *testing.T) {
+			var buf bytes.Buffer
+			const smallBuf = 8 // small enough to force slow path
+			bw := bufio.NewWriterSize(&buf, smallBuf)
+			// Fill buffer to leave less than FrameHeaderLen bytes available.
+			padding := make([]byte, smallBuf-derp.FrameHeaderLen+1)
+			if _, err := bw.Write(padding); err != nil {
+				t.Fatalf("Write padding: %v", err)
+			}
+			if err := derp.WriteFrameHeader(bw, tt.typ, tt.frameLen); err != nil {
+				t.Fatalf("WriteFrameHeader: %v", err)
+			}
+			bw.Flush()
+			got := buf.Bytes()
+			// The header is after the padding bytes.
+			got = got[len(padding):]
+			if !bytes.Equal(got, tt.want[:]) {
+				t.Errorf("wrote % 02x, want % 02x", got, tt.want)
+			}
+		})
+	}
+
+	// Verify zero allocations on fast path.
+	bw := bufio.NewWriter(io.Discard)
+	got := testing.AllocsPerRun(1000, func() {
+		if err := derp.WriteFrameHeader(bw, derp.FrameSendPacket, 1024); err != nil {
+			t.Fatalf("WriteFrameHeader: %v", err)
+		}
+	})
+	if got != 0 {
+		t.Fatalf("WriteFrameHeader allocs = %f, want 0", got)
+	}
+}
+
+type nopRead struct{}
+
+func (nopRead) Read(p []byte) (int, error) { return len(p), nil }
+
+func BenchmarkReadFrameHeader(b *testing.B) {
+	r := bufio.NewReader(nopRead{})
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, err := derp.ReadFrameHeader(r)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWriteFrameHeader(b *testing.B) {
+	bw := bufio.NewWriter(io.Discard)
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := derp.WriteFrameHeader(bw, derp.FrameSendPacket, 1024); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestClientInfoUnmarshal(t *testing.T) {
 	for i, in := range map[string]struct {
 		json    string
