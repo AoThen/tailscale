@@ -228,6 +228,15 @@ type NetmapDeltaUpdater interface {
 	UpdateNetmapDelta([]netmap.NodeMutation) (ok bool)
 }
 
+// patchDiscoKeyer is an optional interface that can be implemented by an [Observer] to be
+// notified about node disco keys received out-of-band from control, via
+// existing connection state.
+type patchDiscoKeyer interface {
+	// PatchDiscoKey reports to the receiver that the specified disco key
+	// for node was obtained out-of-band from control.
+	PatchDiscoKey(key.NodePublic, key.DiscoPublic)
+}
+
 var nextControlClientID atomic.Int64
 
 // NewDirect returns a new Direct client.
@@ -352,11 +361,16 @@ func NewDirect(opts Options) (*Direct, error) {
 	c.controlTimePub = eventbus.Publish[ControlTime](c.busClient)
 	discoKeyPub := eventbus.Publish[events.PeerDiscoKeyUpdate](c.busClient)
 	eventbus.SubscribeFunc(c.busClient, func(update events.DiscoKeyAdvertisement) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		c.logf("controlclient direct: got TSMP disco key advertisement from %v via eventbus", update.Src)
-		if c.streamingMapSession != nil {
-			nm := c.streamingMapSession.netmap()
+		var nm *netmap.NetworkMap
+		c.mu.Lock()
+		sess := c.streamingMapSession
+		if sess != nil {
+			nm = c.streamingMapSession.netmap()
+		}
+		c.mu.Unlock()
+
+		if sess != nil {
 			peer, ok := nm.PeerByTailscaleIP(update.Src)
 			if !ok {
 				return
@@ -366,8 +380,8 @@ func NewDirect(opts Options) (*Direct, error) {
 			// If we update without error, return. If the err indicates that the
 			// mapSession has gone away, we want to fall back to pushing the key
 			// further down the chain.
-			if err := c.streamingMapSession.updateDiscoForNode(
-				peer.ID(), update.Key, time.Now(), false); err == nil ||
+			if err := sess.updateDiscoForNode(
+				peer.ID(), peer.Key(), update.Key, time.Now(), false); err == nil ||
 				!errors.Is(err, ErrChangeQueueClosed) {
 				return
 			}
@@ -377,10 +391,7 @@ func NewDirect(opts Options) (*Direct, error) {
 		// not have a mapSession (we are not connected to control) or because the
 		// mapSession queue has closed.
 		c.logf("controlclient direct: updating discoKey for %v via magicsock", update.Src)
-		discoKeyPub.Publish(events.PeerDiscoKeyUpdate{
-			Src: update.Src,
-			Key: update.Key,
-		})
+		discoKeyPub.Publish(events.PeerDiscoKeyUpdate(update))
 	})
 
 	return c, nil
@@ -859,8 +870,10 @@ func (c *Direct) PollNetMap(ctx context.Context, nu NetmapUpdater) error {
 // update it observed. It is used by tests and [NetmapFromMapResponseForDebug].
 // It will report only the first netmap seen.
 type rememberLastNetmapUpdater struct {
-	last *netmap.NetworkMap
-	done chan any
+	last          *netmap.NetworkMap
+	lastTSMPKey   key.NodePublic
+	lastTSMPDisco key.DiscoPublic
+	done          chan any
 }
 
 func (nu *rememberLastNetmapUpdater) UpdateFullNetmap(nm *netmap.NetworkMap) {
@@ -869,6 +882,11 @@ func (nu *rememberLastNetmapUpdater) UpdateFullNetmap(nm *netmap.NetworkMap) {
 	case nu.done <- nil:
 	default:
 	}
+}
+
+func (nu *rememberLastNetmapUpdater) PatchDiscoKey(key key.NodePublic, disco key.DiscoPublic) {
+	nu.lastTSMPKey = key
+	nu.lastTSMPDisco = disco
 }
 
 // FetchNetMapForTest fetches the netmap once.

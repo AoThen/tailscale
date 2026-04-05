@@ -33,7 +33,9 @@ import (
 	"tailscale.com/util/eventbus/eventbustest"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/must"
+	"tailscale.com/util/usermetric"
 	"tailscale.com/util/zstdframe"
+	"tailscale.com/wgengine"
 )
 
 func eps(s ...string) []netip.AddrPort {
@@ -678,6 +680,7 @@ func TestUpdateDiscoForNode(t *testing.T) {
 			// Insert existing node
 			node := tailcfg.Node{
 				ID:       1,
+				Key:      key.NewNode().Public(),
 				DiscoKey: oldKey.Public(),
 				Online:   &tt.initialOnline,
 				LastSeen: &tt.initialLastSeen,
@@ -690,7 +693,7 @@ func TestUpdateDiscoForNode(t *testing.T) {
 			}
 
 			newKey := key.NewDisco()
-			ms.updateDiscoForNode(node.ID, newKey.Public(), tt.updateLastSeen, tt.updateOnline)
+			ms.updateDiscoForNode(node.ID, node.Key, newKey.Public(), tt.updateLastSeen, tt.updateOnline)
 			<-nu.done
 
 			nm := ms.netmap()
@@ -702,6 +705,197 @@ func TestUpdateDiscoForNode(t *testing.T) {
 			updated := nm.Peers[peerIdx].DiscoKey().Compare(newKey.Public()) == 0
 			if updated != tt.wantUpdate {
 				t.Fatalf("Disco key update: %t, wanted update: %t", updated, tt.wantUpdate)
+			}
+		})
+	}
+}
+
+func TestUpdateDiscoForNodeCallback(t *testing.T) {
+	t.Run("key_wired_through_to_updater", func(t *testing.T) {
+		nu := &rememberLastNetmapUpdater{
+			done: make(chan any, 1),
+		}
+		ms := newTestMapSession(t, nu)
+
+		oldKey := key.NewDisco()
+
+		// Insert existing node
+		node := tailcfg.Node{
+			ID:       1,
+			Key:      key.NewNode().Public(),
+			DiscoKey: oldKey.Public(),
+			Online:   new(false),
+			LastSeen: new(time.Unix(1, 0)),
+		}
+
+		if nm := ms.netmapForResponse(&tailcfg.MapResponse{
+			Peers: []*tailcfg.Node{&node},
+		}); len(nm.Peers) != 1 {
+			t.Fatalf("node not inserted")
+		}
+
+		newKey := key.NewDisco()
+		ms.updateDiscoForNode(node.ID, node.Key, newKey.Public(), time.Now(), false)
+		<-nu.done
+
+		if nu.lastTSMPKey != node.Key || nu.lastTSMPDisco != newKey.Public() {
+			t.Fatalf("expected [%s]=%s, got [%s]=%s", node.Key, newKey.Public(),
+				nu.lastTSMPKey, nu.lastTSMPDisco)
+		}
+	})
+	// Even though key stays in list of update, the updater only triggers on TSMP.
+	t.Run("key_not_wired_through_to_updater", func(t *testing.T) {
+		nu := &rememberLastNetmapUpdater{
+			done: make(chan any, 1),
+		}
+		ms := newTestMapSession(t, nu)
+
+		oldKey := key.NewDisco()
+
+		// Insert existing node
+		node := tailcfg.Node{
+			ID:       1,
+			Key:      key.NewNode().Public(),
+			DiscoKey: oldKey.Public(),
+			Online:   new(false),
+			LastSeen: new(time.Unix(1, 0)),
+		}
+
+		if nm := ms.netmapForResponse(&tailcfg.MapResponse{
+			Peers: []*tailcfg.Node{&node},
+		}); len(nm.Peers) != 1 {
+			t.Fatalf("node not inserted")
+		}
+
+		newKey := key.NewDisco().Public()
+		resp := &tailcfg.MapResponse{
+			PeersChangedPatch: []*tailcfg.PeerChange{{
+				NodeID:   node.ID,
+				Key:      &node.Key,
+				LastSeen: new(time.Now()),
+				Online:   new(true),
+				DiscoKey: &newKey,
+			}},
+		}
+		// Not TSMP Path, just regular injection path.
+		ms.HandleNonKeepAliveMapResponse(t.Context(), resp)
+		<-nu.done
+
+		if !nu.lastTSMPKey.IsZero() || !nu.lastTSMPDisco.IsZero() {
+			t.Fatalf("expected zero keys, got [%s]=%s",
+				nu.lastTSMPKey, nu.lastTSMPDisco)
+		}
+	})
+}
+
+func TestUpdateDiscoForNodeCallbackWithFullNetmap(t *testing.T) {
+	now := time.Now()
+	oldTime := time.Unix(1, 0)
+
+	tests := []struct {
+		name            string
+		initialOnline   bool
+		initialLastSeen time.Time
+		updateOnline    bool
+		updateLastSeen  time.Time
+		expectNewDisco  bool
+	}{
+		{
+			name:            "disco key wired through when newer lastSeen",
+			initialOnline:   false,
+			initialLastSeen: oldTime,
+			updateOnline:    false,
+			updateLastSeen:  now,
+			expectNewDisco:  true,
+		},
+		{
+			name:            "disco key NOT wired through when older lastSeen",
+			initialOnline:   false,
+			initialLastSeen: now,
+			updateOnline:    false,
+			updateLastSeen:  oldTime,
+			expectNewDisco:  false,
+		},
+		{
+			name:            "disco key wired through when newer lastSeen, going offline",
+			initialOnline:   true,
+			initialLastSeen: oldTime,
+			updateOnline:    false,
+			updateLastSeen:  now,
+			expectNewDisco:  true,
+		},
+		{
+			name:            "online flip with newer lastSeen",
+			initialOnline:   false,
+			initialLastSeen: oldTime,
+			updateOnline:    true,
+			updateLastSeen:  now,
+			expectNewDisco:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nu := &rememberLastNetmapUpdater{
+				done: make(chan any, 1),
+			}
+			ms := newTestMapSession(t, nu)
+
+			oldKey := key.NewDisco()
+
+			// Initial node
+			node := tailcfg.Node{
+				ID:       1,
+				Key:      key.NewNode().Public(),
+				DiscoKey: oldKey.Public(),
+				Online:   new(tt.initialOnline),
+				LastSeen: new(tt.initialLastSeen),
+				Name:     "host.network.ts.net",
+			}
+
+			if nm := ms.netmapForResponse(&tailcfg.MapResponse{
+				Peers: []*tailcfg.Node{&node},
+			}); len(nm.Peers) != 1 {
+				t.Fatalf("node not inserted")
+			}
+
+			newKey := key.NewDisco()
+
+			// Updated node
+			newNode := tailcfg.Node{
+				ID:       1,
+				Key:      node.Key,
+				DiscoKey: newKey.Public(),
+				Online:   new(tt.updateOnline),
+				LastSeen: new(tt.updateLastSeen),
+				Name:     "host.network.ts.net",
+			}
+
+			ms.HandleNonKeepAliveMapResponse(t.Context(), &tailcfg.MapResponse{
+				Node: &newNode,
+				Peers: []*tailcfg.Node{
+					&newNode,
+				},
+			})
+			<-nu.done
+
+			newMap := nu.last
+			if n := len(newMap.Peers); n != 1 {
+				t.Fatalf("netmap not right length, got %d, expected %d", n, 1)
+			}
+
+			peer := newMap.Peers[0]
+
+			expectedDisco := oldKey.Public()
+			if tt.expectNewDisco {
+				expectedDisco = newKey.Public()
+			}
+
+			if peer.Key() != node.Key || peer.DiscoKey() != expectedDisco {
+				t.Fatalf("expected [%s]=%s, got [%s]=%s",
+					node.Key, expectedDisco,
+					peer.Key(), peer.DiscoKey(),
+				)
 			}
 		})
 	}
@@ -1566,5 +1760,24 @@ func TestLearnZstdOfKeepAlive(t *testing.T) {
 	}
 	if got, want := sess.ztdDecodesForTest, 1; got != want {
 		t.Fatalf("got %d zstd decodes; want %d", got, want)
+	}
+}
+
+func TestPathDiscokeyerImplementations(t *testing.T) {
+	bus := eventbustest.NewBus(t)
+	ht := health.NewTracker(bus)
+	reg := new(usermetric.Registry)
+	e, err := wgengine.NewFakeUserspaceEngine(t.Logf, 0, ht, reg, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	if _, ok := e.(patchDiscoKeyer); !ok {
+		t.Error("wgengine.userspaceEngine must implement patchDiscoKeyer")
+	}
+
+	wd := wgengine.NewWatchdog(e)
+	if _, ok := wd.(patchDiscoKeyer); !ok {
+		t.Error("wgengine.watchdogEngine must implement patchDiscoKeyer")
 	}
 }

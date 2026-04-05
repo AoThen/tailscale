@@ -1220,7 +1220,7 @@ func (c *Conn) RotateDiscoKey() {
 	connCtx := c.connCtx
 	for _, endpoint := range c.peerMap.byEpAddr {
 		endpoint.ep.mu.Lock()
-		endpoint.ep.sentDiscoKeyAdvertisement = false
+		endpoint.ep.lastDiscoKeyAdvertisement = 0
 		endpoint.ep.mu.Unlock()
 	}
 	c.mu.Unlock()
@@ -1438,7 +1438,18 @@ func (c *Conn) LocalPort() uint16 {
 
 var errNetworkDown = errors.New("magicsock: network down")
 
-func (c *Conn) networkDown() bool { return !c.networkUp.Load() }
+// This allows tests to pass when the user's machine is offline, but allows us
+// to still test network-down behaviour when desired.
+var checkNetworkDownDuringTests = false
+
+func (c *Conn) networkDown() bool {
+	// For tests, always assume the network is up unless we're explicitly
+	// testing this behaviour.
+	if envknob.AssumeNetworkUp() || (testenv.InTest() && !checkNetworkDownDuringTests) {
+		return false
+	}
+	return !c.networkUp.Load()
+}
 
 // Send implements conn.Bind.
 //
@@ -4318,14 +4329,14 @@ type NewDiscoKeyAvailable struct {
 //
 // We do not need the Conn to be locked, but the endpoint should be.
 func (c *Conn) maybeSendTSMPDiscoAdvert(de *endpoint) {
-	if !buildfeatures.HasCacheNetMap || !envknob.Bool("TS_USE_CACHED_NETMAP") {
+	if !buildfeatures.HasCacheNetMap || !envknob.BoolDefaultTrue("TS_USE_CACHED_NETMAP") {
 		return
 	}
 
 	de.mu.Lock()
 	defer de.mu.Unlock()
-	if !de.sentDiscoKeyAdvertisement {
-		de.sentDiscoKeyAdvertisement = true
+	if mono.Now().Sub(de.lastDiscoKeyAdvertisement) > discoKeyAdvertisementInterval {
+		de.lastDiscoKeyAdvertisement = mono.Now()
 		c.tsmpDiscoKeyAvailablePub.Publish(NewDiscoKeyAvailable{
 			NodeFirstAddr: de.nodeAddr,
 			NodeID:        de.nodeID,

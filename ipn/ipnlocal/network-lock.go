@@ -44,7 +44,7 @@ import (
 
 var (
 	errMissingNetmap        = errors.New("missing netmap: verify that you are logged in")
-	errNetworkLockNotActive = errors.New("network-lock is not active")
+	errNetworkLockNotActive = errors.New("tailnet-lock is not active")
 
 	tkaCompactionDefaults = tka.CompactionOptions{
 		MinChain: 24,                  // Keep at minimum 24 AUMs since head.
@@ -654,15 +654,10 @@ func (b *LocalBackend) NetworkLockInit(keys []tka.Key, disablementValues [][]byt
 	// the filesystem until we've finished the initialization sequence,
 	// just in case something goes wrong.
 	_, genesisAUM, err := tka.Create(tka.ChonkMem(), tka.State{
-		Keys: keys,
-		// TODO(tom): s/tka.State.DisablementSecrets/tka.State.DisablementValues
-		//   This will center on consistent nomenclature:
-		//    - DisablementSecret: value needed to disable.
-		//    - DisablementValue: the KDF of the disablement secret, a public value.
-		DisablementSecrets: disablementValues,
-
-		StateID1: binary.LittleEndian.Uint64(entropy[:8]),
-		StateID2: binary.LittleEndian.Uint64(entropy[8:]),
+		Keys:              keys,
+		DisablementValues: disablementValues,
+		StateID1:          binary.LittleEndian.Uint64(entropy[:8]),
+		StateID2:          binary.LittleEndian.Uint64(entropy[8:]),
 	}, nlPriv)
 	if err != nil {
 		return fmt.Errorf("tka.Create: %v", err)
@@ -806,7 +801,7 @@ func (b *LocalBackend) NetworkLockSign(nodeKey key.NodePublic, rotationPublic []
 func (b *LocalBackend) NetworkLockModify(addKeys, removeKeys []tka.Key) (err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("modify network-lock keys: %w", err)
+			err = fmt.Errorf("modify tailnet-lock keys: %w", err)
 		}
 	}()
 
@@ -1126,7 +1121,7 @@ func (b *LocalBackend) NetworkLockWrapPreauthKey(preauthKey string, tkaKey key.N
 		return "", fmt.Errorf("signing failed: %w", err)
 	}
 
-	b.logf("Generated network-lock credential signature using %s", tkaKey.Public().CLIString())
+	b.logf("Generated tailnet-lock credential signature using %s", tkaKey.Public().CLIString())
 	return fmt.Sprintf("%s--TL%s-%s", preauthKey, tkaSuffixEncoder.EncodeToString(sig.Serialize()), tkaSuffixEncoder.EncodeToString(priv)), nil
 }
 
